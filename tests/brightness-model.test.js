@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import {normalizeBrightness, parseDdcBrightness, parseDdcDetection,
+import {brightnessFromDevice, brightnessToDevice, normalizeBrightness, parseDdcBrightness, parseDdcDetection,
     matchDdcDisplay, normalizeConnector, parseDdcReading, retryDelay,
     sameDisplayedPercent, selectBrightnessBackend} from '../brightness-model.js';
 
@@ -17,6 +17,16 @@ test('normalizes hardware ranges, including a nonzero minimum', () => {
     assert.equal(normalizeBrightness(0, 10, 110), 0);
     assert.equal(normalizeBrightness(120, 10, 110), 1);
     assert.equal(normalizeBrightness(5, 7, 7), null);
+});
+
+test('maps the UI brightness range to a safe nonzero device range', () => {
+    assert.equal(brightnessToDevice(0), .02);
+    assert.equal(brightnessToDevice(1), 1);
+    assert.equal(brightnessFromDevice(.02), 0);
+    assert.equal(brightnessFromDevice(1), 1);
+    assert.equal(brightnessToDevice(0, 10), .1);
+    assert.equal(brightnessFromDevice(.1, 10), 0);
+    assert.equal(brightnessToDevice(0, 0), .02);
 });
 
 test('detects equality using the displayed whole percentages', () => {

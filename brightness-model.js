@@ -12,6 +12,18 @@ export function normalizeBrightness(value, minimum, maximum) {
     return Math.min(1, Math.max(0, (value - minimum) / (maximum - minimum)));
 }
 
+export function brightnessToDevice(value, minimumPercent = 2) {
+    const minimum = Math.min(20, Math.max(2, Number(minimumPercent) || 2)) / 100;
+    const normalized = Math.min(1, Math.max(0, Number(value) || 0));
+    return minimum + normalized * (1 - minimum);
+}
+
+export function brightnessFromDevice(value, minimumPercent = 2) {
+    const minimum = Math.min(20, Math.max(2, Number(minimumPercent) || 2)) / 100;
+    const actual = Math.min(1, Math.max(0, Number(value) || 0));
+    return Math.min(1, Math.max(0, (actual - minimum) / (1 - minimum)));
+}
+
 export function sameDisplayedPercent(displays) {
     return displays.length > 0 && displays.every(display =>
         Math.round(display.value * 100) === Math.round(displays[0].value * 100));

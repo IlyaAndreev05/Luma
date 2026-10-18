@@ -2,6 +2,8 @@
 
 Luma adds a compact display brightness control to GNOME 50 Quick Settings. Internal displays use GNOME's monitor backlight; external monitors use DDC/CI when available; monitors without a writable backlight can be dimmed in software.
 
+The brightness slider maps its minimum to a configurable safe floor (2–20%, default 2%) instead of turning the image fully black. The current percentage can be shown or hidden in Luma's settings.
+
 ## Install
 
 Install `ddcutil` from Ubuntu's repository for external monitor controls. Enable DDC/CI in the monitor's on-screen menu. The current user needs read/write access to the monitor's `/dev/i2c-*` device; on Ubuntu, install the distribution's I²C udev/group rules and sign out and back in after changing group membership. Do not run GNOME Shell as root. Software dimming remains available when DDC/CI cannot be used.

@@ -8,7 +8,7 @@ import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import {QuickSlider, SystemIndicator} from 'resource:///org/gnome/shell/ui/quickSettings.js';
 import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 import {Slider} from 'resource:///org/gnome/shell/ui/slider.js';
-import {normalizeBrightness, parseDdcDetection, parseDdcReading, retryDelay,
+import {brightnessFromDevice, brightnessToDevice, normalizeBrightness, parseDdcDetection, parseDdcReading, retryDelay,
     matchDdcDisplay, selectBrightnessBackend} from './brightness-model.js';
 
 const DDC_TIMEOUT_MS = 3000;
@@ -216,9 +216,12 @@ class BrightnessService {
                 });
                 const nativeScale = Main.brightnessManager.scales.find(s => s.monitor === logical);
                 const backend = selectBrightnessBackend({backlight, nativeScale, ddc: Boolean(ddc)});
-                const value = backlight
+                const deviceValue = backlight
                     ? normalizeBrightness(backlight.brightness, backlight.brightnessMin, backlight.brightnessMax)
                     : nativeScale?.value;
+                const value = deviceValue === undefined || deviceValue === null
+                    ? deviceValue
+                    : brightnessFromDevice(deviceValue, this._settings.get_int('minimum-brightness'));
                 const edid = ddc?.edid || monitor.get_vendor?.() + monitor.get_product?.() + monitor.get_serial?.();
                 const device = {
                     id: `${edid || 'unknown'}|${connector}`,
@@ -236,7 +239,7 @@ class BrightnessService {
                 };
                 if (device.ddc) {
                     device.ddc.onChange = actual => {
-                        device.value = actual;
+                        device.value = brightnessFromDevice(actual, this._settings.get_int('minimum-brightness'));
                         device.requestedValue = null;
                         device.error = '';
                         this._saveConfirmed(device);
@@ -304,25 +307,26 @@ class BrightnessService {
         if (!device)
             return;
         value = finite(value);
+        const deviceValue = brightnessToDevice(value, this._settings.get_int('minimum-brightness'));
         if (device.ddc) {
             device.error = '';
             device.requestedValue = value;
-            device.ddc.set(value);
+            device.ddc.set(deviceValue);
             this._emit();
             return;
         }
         if (device.backend === 'mutter' && device.backlight) {
             const {brightnessMin, brightnessMax} = device.backlight;
-            device.backlight.brightness = Math.round(brightnessMin + value * (brightnessMax - brightnessMin));
+            device.backlight.brightness = Math.round(brightnessMin + deviceValue * (brightnessMax - brightnessMin));
             device.requestedValue = value;
         } else if (device.backend === 'mutter' && device.nativeScale) {
             device.requestedValue = value;
-            device.nativeScale.value = value;
+            device.nativeScale.value = deviceValue;
         } else {
             // Software dimming is explicitly shown in the UI and never changes the reported hardware level.
             device.softwareValue = value;
             device.value = value;
-            this._setOverlay(device, value);
+            this._setOverlay(device, deviceValue);
             this._saveConfirmed(device);
         }
         this._emit();
@@ -367,11 +371,14 @@ class BrightnessService {
         for (const device of this._displays) {
             if (device.backlight) {
                 const {brightness, brightnessMin, brightnessMax} = device.backlight;
-                device.value = normalizeBrightness(brightness, brightnessMin, brightnessMax) ?? device.value;
+                const actual = normalizeBrightness(brightness, brightnessMin, brightnessMax);
+                device.value = actual === null ? device.value
+                    : brightnessFromDevice(actual, this._settings.get_int('minimum-brightness'));
                 device.requestedValue = null;
                 this._saveConfirmed(device);
             } else if (device.nativeScale) {
-                device.value = finite(device.nativeScale.value);
+                device.value = brightnessFromDevice(finite(device.nativeScale.value),
+                    this._settings.get_int('minimum-brightness'));
                 device.requestedValue = null;
                 this._saveConfirmed(device);
             }
@@ -435,6 +442,7 @@ class BrightnessPanel extends QuickSlider {
         });
         this._owner = owner;
         this._service = service;
+        this._settings = owner.settings;
         this._devices = [];
         this.slider.accessible_name = _('Brightness for all displays');
         this.slider.connect('notify::value', () => {
@@ -442,9 +450,13 @@ class BrightnessPanel extends QuickSlider {
                 this._service.setAll(this.slider.value);
         });
 
+        this._mainPercentage = new St.Label({text: '100%', style_class: 'dim-label'});
+        this._mainPercentage.accessible_name = _('Brightness percentage');
+
         this._resetButton = new St.Button({
             label: '100%',
             style_class: 'button',
+            style: 'min-width: 40px; max-width: 40px; min-height: 40px; max-height: 40px; padding: 0; border-radius: 20px; font-size: 9pt;',
             can_focus: true,
             accessible_name: _('Set all displays to 100 percent'),
         });
@@ -452,7 +464,10 @@ class BrightnessPanel extends QuickSlider {
         // QuickSlider supplies GNOME's themed slider and compact menu arrow.
         // Insert the reset action immediately before that arrow.
         const controls = this.get_child();
-        controls.insert_child_at_index(this._resetButton, controls.get_n_children() - 1);
+        const arrowIndex = controls.get_n_children() - 1;
+        controls.insert_child_at_index(this._mainPercentage, arrowIndex);
+        controls.insert_child_at_index(this._resetButton, arrowIndex + 1);
+        owner.settings.connectObject('changed::show-percentage', () => this._syncMenu(this._devices), this);
 
         this.menu.setHeader('display-brightness-symbolic', _('Display brightness'));
         this._deviceSection = new PopupMenu.PopupMenuSection();
@@ -470,10 +485,13 @@ class BrightnessPanel extends QuickSlider {
         this._syncingMainSlider = false;
         this._resetButton.reactive = devices.length > 0;
         this._resetButton.can_focus = devices.length > 0;
+        this._mainPercentage.text = `${Math.round(value * 100)}%`;
+        this._mainPercentage.visible = this._settings.get_boolean('show-percentage');
         this._syncMenu(devices);
     }
 
     _syncMenu(devices) {
+        this._mainPercentage.visible = this._settings.get_boolean('show-percentage');
         const signature = devices.map(device => device.id).join(';');
         if (signature !== this._menuSignature) {
             this._menuSignature = signature;
@@ -494,6 +512,7 @@ class BrightnessPanel extends QuickSlider {
                 continue;
             const value = device.requestedValue ?? device.value;
             control.percentage.text = `${Math.round(value * 100)}%`;
+            control.percentage.visible = this._settings.get_boolean('show-percentage');
             control.method.text = this._methodLabel(device);
             if (!control.adjusting) {
                 this._syncingMenuSlider = true;
@@ -519,6 +538,7 @@ class BrightnessPanel extends QuickSlider {
         const info = new St.BoxLayout({x_expand: true});
         const method = new St.Label({text: this._methodLabel(device), style_class: 'dim-label', x_expand: true});
         const percentage = new St.Label({text: `${Math.round((device.requestedValue ?? device.value) * 100)}%`, style_class: 'dim-label'});
+        percentage.visible = this._settings.get_boolean('show-percentage');
         info.add_child(method);
         info.add_child(percentage);
         const infoItem = new PopupMenu.PopupBaseMenuItem({reactive: false});
@@ -538,6 +558,7 @@ class BrightnessPanel extends QuickSlider {
         const reset = new St.Button({
             label: '100%',
             style_class: 'button',
+            style: 'min-width: 40px; max-width: 40px; min-height: 40px; max-height: 40px; padding: 0; border-radius: 20px; font-size: 9pt;',
             can_focus: true,
             accessible_name: _('Set %s to 100 percent').format(device.name),
         });

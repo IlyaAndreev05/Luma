@@ -4,5 +4,7 @@
     <key name="saved-brightness" type="a{sd}"><default>{}</default><summary>Last confirmed brightness by display</summary></key>
     <key name="expanded" type="b"><default>false</default><summary>Show individual display sliders</summary></key>
     <key name="ddc-refresh-seconds" type="i"><default>10</default><range min="2" max="60"/></key>
+    <key name="show-percentage" type="b"><default>true</default><summary>Show brightness percentages</summary></key>
+    <key name="minimum-brightness" type="i"><default>2</default><range min="2" max="20"/><summary>Safe minimum brightness percentage</summary></key>
   </schema>
 </schemalist>
