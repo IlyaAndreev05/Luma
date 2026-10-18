@@ -2,7 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {normalizeBrightness, parseDdcBrightness, parseDdcDetection,
-    parseDdcReading, retryDelay, sameDisplayedPercent, selectBrightnessBackend} from '../brightness-model.js';
+    matchDdcDisplay, normalizeConnector, parseDdcReading, retryDelay,
+    sameDisplayedPercent, selectBrightnessBackend} from '../brightness-model.js';
 
 test('selects native backlight before DDC/CI and software', () => {
     assert.equal(selectBrightnessBackend({backlight: true, ddc: true}), 'mutter');
@@ -36,9 +37,46 @@ test('parses DDC current and maximum brightness values', () => {
     assert.equal(parseDdcBrightness('invalid output'), null);
 });
 
-test('matches DDC devices by connector and extracts the I2C bus', () => {
-    const result = parseDdcDetection('Display 1, I2C bus: /dev/i2c-7, DRM connector: card1-DP-1\nEDID: ABCD\nDisplay 2, I2C bus: /dev/i2c-9, DRM connector: card1-HDMI-A-1');
-    assert.deepEqual(result.get('card1-DP-1'), {bus: 7, edid: 'ABCD'});
-    assert.deepEqual(result.get('DP-1'), {bus: 7, edid: 'ABCD'});
-    assert.deepEqual(result.get('card1-HDMI-A-1'), {bus: 9, edid: ''});
+test('parses the multiline ddcutil brief output and matches EDID identity', () => {
+    const result = parseDdcDetection(`Display 1
+   I2C bus:          /dev/i2c-4
+   DRM connector:    card1-HDMI-A-1
+   Monitor:          BNQ:BenQ PD3200Q:J8J00785019`);
+    assert.deepEqual(result, [{
+        bus: 4,
+        edid: '',
+        connector: 'HDMI-A-1',
+        vendor: 'BNQ',
+        product: 'BenQ PD3200Q',
+        serial: 'J8J00785019',
+    }]);
+    assert.equal(matchDdcDisplay(result, {
+        connector: 'HDMI-1', vendor: 'BNQ', product: 'BenQ PD3200Q', serial: 'J8J00785019',
+    }), result[0]);
+});
+
+test('normalizes connector aliases and refuses ambiguous fallback matches', () => {
+    assert.equal(normalizeConnector('card1-HDMI-A-1'), 'HDMI-1');
+    assert.equal(normalizeConnector('HDMI-1'), 'HDMI-1');
+    const displays = [
+        {bus: 4, connector: 'HDMI-A-1', vendor: 'BNQ', product: 'BenQ PD3200Q', serial: 'J8J00785019'},
+        {bus: 5, connector: 'DP-1', vendor: 'BNQ', product: 'BenQ PD3200Q', serial: 'J8J00785019'},
+    ];
+    assert.equal(matchDdcDisplay(displays, {connector: 'DP-1', vendor: 'BNQ', product: 'BenQ PD3200Q', serial: 'missing'}), null);
+    assert.equal(matchDdcDisplay([
+        {bus: 4, connector: 'HDMI-A-1'},
+        {bus: 5, connector: 'HDMI-1'},
+    ], {connector: 'HDMI-1'}), null);
+});
+
+test('matches identical monitor models by unique serial number', () => {
+    const displays = [
+        {bus: 4, connector: 'HDMI-A-1', vendor: 'BNQ', product: 'BenQ PD3200Q', serial: 'ONE'},
+        {bus: 5, connector: 'HDMI-A-2', vendor: 'BNQ', product: 'BenQ PD3200Q', serial: 'TWO'},
+    ];
+    assert.equal(matchDdcDisplay(displays, {vendor: 'BNQ', product: 'BenQ PD3200Q', serial: 'TWO'}), displays[1]);
+    assert.equal(matchDdcDisplay(displays, {vendor: 'BNQ', product: 'BenQ PD3200Q'}), null);
+    assert.equal(matchDdcDisplay(displays, {
+        connector: 'HDMI-1', vendor: 'BNQ', product: 'BenQ PD3200Q',
+    }), displays[0]);
 });

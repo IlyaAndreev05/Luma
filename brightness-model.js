@@ -36,20 +36,73 @@ export function parseDdcBrightness(output) {
 }
 
 export function parseDdcDetection(output) {
-    const result = new Map();
+    const result = [];
     for (const chunk of output.split(/(?=Display\s+\d+)/i)) {
-        const display = chunk.match(/Display\s+\d+[^\n]*I2C bus:\s*([^\s,]+)/i);
+        const display = chunk.match(/I2C bus:\s*([^\s,]+)/i);
         const connector = chunk.match(/DRM connector:\s*([^\s]+)/i);
-        if (!display || !connector)
+        if (!display)
             continue;
         const bus = display[1].match(/i2c-(\d+)/i)?.[1] || display[1];
-        result.set(connector[1], {
+        const monitor = chunk.match(/Monitor:\s*([^:\n]+):([^:\n]+)(?::([^\n]+))?/i);
+        result.push({
             bus: Number(bus),
             edid: chunk.match(/EDID:\s*([\da-f]+)/i)?.[1] || '',
+            connector: connector?.[1]?.replace(/^card\d+-/, '') || '',
+            vendor: monitor?.[1]?.trim() || '',
+            product: monitor?.[2]?.trim() || '',
+            serial: monitor?.[3]?.trim() || '',
         });
-        const drmConnector = connector[1].replace(/^card\d+-/, '');
-        if (drmConnector !== connector[1])
-            result.set(drmConnector, result.get(connector[1]));
     }
     return result;
+}
+
+function identityPart(value) {
+    return String(value ?? '').trim().toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
+export function normalizeConnector(connector) {
+    return String(connector ?? '')
+        .trim()
+        .replace(/^card\d+-/i, '')
+        .replace(/^(HDMI)-A-(\d+)$/i, '$1-$2')
+        .toUpperCase();
+}
+
+export function matchDdcDisplay(displays, monitor) {
+    const vendor = identityPart(monitor?.vendor);
+    const product = identityPart(monitor?.product);
+    const serial = identityPart(monitor?.serial);
+    const compatibleIdentity = display => {
+        const candidateVendor = identityPart(display.vendor);
+        const candidateProduct = identityPart(display.product);
+        const candidateSerial = identityPart(display.serial);
+        return (!vendor || !candidateVendor || vendor === candidateVendor) &&
+            (!product || !candidateProduct || product === candidateProduct) &&
+            (!serial || !candidateSerial || serial === candidateSerial);
+    };
+
+    let identityMatches = null;
+    if (serial) {
+        const matches = displays.filter(display => identityPart(display.serial) === serial && compatibleIdentity(display));
+        if (matches.length === 1)
+            return matches[0];
+        if (matches.length > 1)
+            identityMatches = matches;
+    } else if (vendor && product) {
+        const matches = displays.filter(display =>
+            compatibleIdentity(display) && identityPart(display.vendor) === vendor &&
+            identityPart(display.product) === product);
+        if (matches.length === 1)
+            return matches[0];
+        if (matches.length > 1)
+            identityMatches = matches;
+    }
+
+    const connector = normalizeConnector(monitor?.connector);
+    if (!connector)
+        return null;
+    const matches = displays.filter(display =>
+        (!identityMatches || identityMatches.includes(display)) &&
+        compatibleIdentity(display) && normalizeConnector(display.connector) === connector);
+    return matches.length === 1 ? matches[0] : null;
 }

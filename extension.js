@@ -5,10 +5,11 @@ import St from 'gi://St';
 import Clutter from 'gi://Clutter';
 import {Extension, gettext as _} from 'resource:///org/gnome/shell/extensions/extension.js';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
-import {QuickSettingsItem, SystemIndicator} from 'resource:///org/gnome/shell/ui/quickSettings.js';
+import {QuickSlider, SystemIndicator} from 'resource:///org/gnome/shell/ui/quickSettings.js';
+import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 import {Slider} from 'resource:///org/gnome/shell/ui/slider.js';
 import {normalizeBrightness, parseDdcDetection, parseDdcReading, retryDelay,
-    sameDisplayedPercent, selectBrightnessBackend} from './brightness-model.js';
+    matchDdcDisplay, selectBrightnessBackend} from './brightness-model.js';
 
 const DDC_TIMEOUT_MS = 3000;
 const DDC_DEBOUNCE_MS = 100;
@@ -189,7 +190,7 @@ class BrightnessService {
     async refresh() {
         const generation = ++this._generation;
         this._destroyDevices();
-        let ddcMap = new Map();
+        let ddcMap = [];
         try {
             const output = await this._subprocess(['ddcutil', 'detect', '--brief'], 6000);
             if (output)
@@ -207,9 +208,14 @@ class BrightnessService {
                     continue;
                 const connector = monitor.get_connector?.() || monitor.get_display_name();
                 const backlight = monitor.get_backlight?.();
-                const ddc = ddcMap.get(connector);
+                const ddc = matchDdcDisplay(ddcMap, {
+                    connector,
+                    vendor: monitor.get_vendor?.(),
+                    product: monitor.get_product?.(),
+                    serial: monitor.get_serial?.(),
+                });
                 const nativeScale = Main.brightnessManager.scales.find(s => s.monitor === logical);
-                const backend = selectBrightnessBackend({backlight, nativeScale, ddc: ddcMap.has(connector)});
+                const backend = selectBrightnessBackend({backlight, nativeScale, ddc: Boolean(ddc)});
                 const value = backlight
                     ? normalizeBrightness(backlight.brightness, backlight.brightnessMin, backlight.brightnessMax)
                     : nativeScale?.value;
@@ -250,6 +256,7 @@ class BrightnessService {
                 }
             }
         }
+        this._pollDdcQueue();
         this._schedulePoll();
         this._emit();
     }
@@ -418,113 +425,145 @@ class BrightnessService {
 }
 
 const BrightnessPanel = GObject.registerClass(
-class BrightnessPanel extends QuickSettingsItem {
+class BrightnessPanel extends QuickSlider {
     _init(owner, service) {
-        super._init({style_class: 'quick-settings-system-item'});
+        super._init({
+            iconName: 'display-brightness-symbolic',
+            iconLabel: _('Display brightness'),
+            menuEnabled: true,
+            menuButtonAccessibleName: _('Open display brightness menu'),
+        });
         this._owner = owner;
         this._service = service;
         this._devices = [];
-        this._expanded = owner.settings.get_boolean('expanded');
-        this._rows = new St.BoxLayout({vertical: true, style_class: 'quick-settings-grid'});
-        this.set_child(this._rows);
-        this.connect('notify::visible', () => this._service.setMenuOpen(this.visible));
-        this._render([]);
+        this.slider.accessible_name = _('Brightness for all displays');
+        this.slider.connect('notify::value', () => {
+            if (!this._syncingMainSlider)
+                this._service.setAll(this.slider.value);
+        });
+
+        this._resetButton = new St.Button({
+            label: '100%',
+            style_class: 'button',
+            can_focus: true,
+            accessible_name: _('Set all displays to 100 percent'),
+        });
+        this._resetButton.connect('clicked', () => this._service.setAll(1));
+        // QuickSlider supplies GNOME's themed slider and compact menu arrow.
+        // Insert the reset action immediately before that arrow.
+        const controls = this.get_child();
+        controls.insert_child_at_index(this._resetButton, controls.get_n_children() - 1);
+
+        this.menu.setHeader('display-brightness-symbolic', _('Display brightness'));
+        this._deviceSection = new PopupMenu.PopupMenuSection();
+        this.menu.addMenuItem(this._deviceSection);
+        this.menu.connect('open-state-changed', (_menu, open) => this._service.setMenuOpen(open));
+        this._syncMenu([]);
     }
 
-    update(devices) { this._render(devices); }
-
-    _render(devices) {
+    update(devices) {
         this._devices = devices;
-        if (!devices.length) {
-            if (this._layout !== 'empty') {
-                this._rows.destroy_all_children();
-                this._rows.add_child(new St.Label({text: _('No active displays'), style_class: 'dim-label'}));
-                this._layout = 'empty';
-            }
-            return;
-        }
-        const adjusted = devices.map(d => ({...d, value: d.requestedValue ?? d.value}));
-        const same = sameDisplayedPercent(adjusted);
-        const sharedAdjusting = this._layout?.startsWith('shared:') && this._controls?.get('shared')?.adjusting;
-        if (!same && !sharedAdjusting)
-            this._expanded = true;
-        const collapsed = (same && !this._expanded) || sharedAdjusting;
-        const layout = `${collapsed ? 'shared' : 'individual'}:${devices.map(d => d.id).join(';')}`;
-        if (layout !== this._layout) {
-            this._rows.destroy_all_children();
+        const values = devices.map(device => device.requestedValue ?? device.value);
+        const value = values.length ? values.reduce((sum, current) => sum + current, 0) / values.length : 1;
+        this._syncingMainSlider = true;
+        this.slider.value = value;
+        this._syncingMainSlider = false;
+        this._resetButton.reactive = devices.length > 0;
+        this._resetButton.can_focus = devices.length > 0;
+        this._syncMenu(devices);
+    }
+
+    _syncMenu(devices) {
+        const signature = devices.map(device => device.id).join(';');
+        if (signature !== this._menuSignature) {
+            this._menuSignature = signature;
+            this._deviceSection.removeAll();
             this._controls = new Map();
-            this._layout = layout;
-            if (collapsed) {
-                this._addSliderRow(_('Display brightness'), adjusted[0].value,
-                    value => this._service.setAll(value), true, _('All displays'));
-            } else {
-                for (const device of devices)
-                    this._addSliderRow(device.name, device.requestedValue ?? device.value,
-                        value => this._service.setBrightness(device.id, value), false,
-                        device.ddc ? _('DDC/CI') : device.backend === 'mutter' ? _('Hardware backlight') : _('Software dimming'), device.id);
-                if (same) {
-                    const collapse = new St.Button({label: _('Collapse'), style_class: 'button', x_expand: true});
-                    collapse.connect('clicked', () => {
-                        this._expanded = false;
-                        this._owner.settings.set_boolean('expanded', false);
-                        this._render(this._devices);
-                    });
-                    this._rows.add_child(collapse);
-                }
+            if (devices.length === 0) {
+                const empty = new PopupMenu.PopupMenuItem(_('No active displays'), {reactive: false});
+                this._deviceSection.addMenuItem(empty);
+                return;
             }
+            for (const device of devices)
+                this._addDisplayControls(device);
         }
+
         for (const device of devices) {
-            const control = this._controls.get(collapsed ? 'shared' : device.id);
-            if (!control || control.adjusting)
+            const control = this._controls.get(device.id);
+            if (!control)
                 continue;
-            const value = collapsed ? (devices[0].requestedValue ?? devices[0].value) : (device.requestedValue ?? device.value);
-            control.slider.value = value;
+            const value = device.requestedValue ?? device.value;
             control.percentage.text = `${Math.round(value * 100)}%`;
+            control.method.text = this._methodLabel(device);
+            if (!control.adjusting) {
+                this._syncingMenuSlider = true;
+                control.slider.value = value;
+                this._syncingMenuSlider = false;
+            }
+            control.error.text = device.error;
+            control.error.visible = Boolean(device.error);
+            control.errorItem.visible = Boolean(device.error);
         }
     }
 
-    _addSliderRow(name, value, onChange, shared, method, id = 'shared') {
-        const head = new St.BoxLayout({x_expand: true});
-        head.add_child(new St.Label({text: name, x_expand: true, y_align: Clutter.ActorAlign.CENTER}));
-        if (!shared)
-            head.add_child(new St.Label({text: method, style_class: 'dim-label', y_align: Clutter.ActorAlign.CENTER}));
-        const percentage = new St.Label({text: `${Math.round(value * 100)}%`, style_class: 'dim-label', y_align: Clutter.ActorAlign.CENTER});
-        head.add_child(percentage);
-        if (shared) {
-            const expand = new St.Button({child: new St.Icon({icon_name: 'go-down-symbolic'}), style_class: 'button', can_focus: true, accessible_name: _('Show individual displays')});
-            expand.connect('clicked', () => {
-                this._expanded = true;
-                this._owner.settings.set_boolean('expanded', true);
-                this._render(this._devices);
-            });
-            head.add_child(expand);
-        }
-        this._rows.add_child(head);
-        const line = new St.BoxLayout({x_expand: true, style_class: 'quick-settings-slider'});
-        line.add_child(new St.Icon({icon_name: 'display-brightness-symbolic', style_class: 'quick-settings-slider-icon'}));
-        const slider = new Slider(value);
-        slider.accessible_name = name;
-        slider.x_expand = true;
-        const control = {slider, percentage, adjusting: false};
+    _methodLabel(device) {
+        return device.ddc ? _('DDC/CI monitor brightness')
+            : device.backend === 'mutter' ? _('System brightness control')
+                : _('Software dimming');
+    }
+
+    _addDisplayControls(device) {
+        const title = new PopupMenu.PopupMenuItem(device.name, {reactive: false});
+        this._deviceSection.addMenuItem(title);
+
+        const info = new St.BoxLayout({x_expand: true});
+        const method = new St.Label({text: this._methodLabel(device), style_class: 'dim-label', x_expand: true});
+        const percentage = new St.Label({text: `${Math.round((device.requestedValue ?? device.value) * 100)}%`, style_class: 'dim-label'});
+        info.add_child(method);
+        info.add_child(percentage);
+        const infoItem = new PopupMenu.PopupBaseMenuItem({reactive: false});
+        infoItem.add_child(info);
+        this._deviceSection.addMenuItem(infoItem);
+
+        const slider = new Slider(device.requestedValue ?? device.value);
+        slider.accessible_name = _('Brightness for %s').format(device.name);
+        const sliderBin = new St.Bin({
+            style_class: 'slider-bin',
+            child: slider,
+            reactive: true,
+            can_focus: true,
+            x_expand: true,
+            y_align: Clutter.ActorAlign.CENTER,
+        });
+        const reset = new St.Button({
+            label: '100%',
+            style_class: 'button',
+            can_focus: true,
+            accessible_name: _('Set %s to 100 percent').format(device.name),
+        });
+        reset.connect('clicked', () => this._service.setBrightness(device.id, 1));
+        const sliderItem = new PopupMenu.PopupBaseMenuItem({reactive: false});
+        sliderItem.add_child(sliderBin);
+        sliderItem.add_child(reset);
+        this._deviceSection.addMenuItem(sliderItem);
+
+        const error = new St.Label({text: '', style_class: 'dim-label', visible: false});
+        const errorItem = new PopupMenu.PopupBaseMenuItem({reactive: false, visible: false});
+        errorItem.add_child(error);
+        this._deviceSection.addMenuItem(errorItem);
+        this._deviceSection.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
+
+        const control = {slider, method, percentage, error, errorItem, adjusting: false};
+        this._controls.set(device.id, control);
         slider.connect('drag-begin', () => control.adjusting = true);
         slider.connect('drag-end', () => {
             control.adjusting = false;
-            onChange(slider.value);
-            this._render(this._devices);
+            this._service.setBrightness(device.id, slider.value);
         });
         slider.connect('notify::value', () => {
-            if (!control.adjusting)
-                onChange(slider.value);
+            if (!this._syncingMenuSlider && !control.adjusting)
+                this._service.setBrightness(device.id, slider.value);
         });
-        this._controls.set(id, control);
-        line.add_child(slider);
-        const reset = new St.Button({label: '100%', style_class: 'button', can_focus: true, accessible_name: _('Set %s to 100 percent').format(name)});
-        reset.connect('clicked', () => onChange(1));
-        line.add_child(reset);
-        this._rows.add_child(line);
-        const device = this._devices.find(candidate => candidate.id === id);
-        if (!shared && device?.error)
-            this._rows.add_child(new St.Label({text: device.error, style_class: 'dim-label'}));
     }
 });
 
