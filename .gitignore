@@ -1,0 +1,4 @@
+dist/
+build/
+schemas/gschemas.compiled
+messages.mo

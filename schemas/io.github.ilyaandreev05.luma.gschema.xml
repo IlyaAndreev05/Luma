@@ -1,0 +1,8 @@
+<schemalist>
+  <schema id="io.github.ilyaandreev05.luma" path="/io/github/ilyaandreev05/luma/">
+    <key name="restore-brightness" type="b"><default>true</default><summary>Restore the last saved brightness</summary></key>
+    <key name="saved-brightness" type="a{sd}"><default>{}</default><summary>Last confirmed brightness by display</summary></key>
+    <key name="expanded" type="b"><default>false</default><summary>Show individual display sliders</summary></key>
+    <key name="ddc-refresh-seconds" type="i"><default>10</default><range min="2" max="60"/></key>
+  </schema>
+</schemalist>
