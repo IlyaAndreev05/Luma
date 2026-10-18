@@ -8,7 +8,7 @@ import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import {QuickSlider, SystemIndicator} from 'resource:///org/gnome/shell/ui/quickSettings.js';
 import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 import {Slider} from 'resource:///org/gnome/shell/ui/slider.js';
-import {brightnessFromDevice, brightnessToDevice, normalizeBrightness, parseDdcDetection, parseDdcReading, retryDelay,
+import {clampBrightnessToMinimum, normalizeBrightness, parseDdcDetection, parseDdcReading, retryDelay,
     matchDdcDisplay, selectBrightnessBackend} from './brightness-model.js';
 
 const DDC_TIMEOUT_MS = 3000;
@@ -219,9 +219,7 @@ class BrightnessService {
                 const deviceValue = backlight
                     ? normalizeBrightness(backlight.brightness, backlight.brightnessMin, backlight.brightnessMax)
                     : nativeScale?.value;
-                const value = deviceValue === undefined || deviceValue === null
-                    ? deviceValue
-                    : brightnessFromDevice(deviceValue, this._settings.get_int('minimum-brightness'));
+                const value = deviceValue;
                 const edid = ddc?.edid || monitor.get_vendor?.() + monitor.get_product?.() + monitor.get_serial?.();
                 const device = {
                     id: `${edid || 'unknown'}|${connector}`,
@@ -239,7 +237,7 @@ class BrightnessService {
                 };
                 if (device.ddc) {
                     device.ddc.onChange = actual => {
-                        device.value = brightnessFromDevice(actual, this._settings.get_int('minimum-brightness'));
+                        device.value = actual;
                         device.requestedValue = null;
                         device.error = '';
                         this._saveConfirmed(device);
@@ -306,8 +304,8 @@ class BrightnessService {
         const device = this._displays.find(d => d.id === id);
         if (!device)
             return;
-        value = finite(value);
-        const deviceValue = brightnessToDevice(value, this._settings.get_int('minimum-brightness'));
+        value = clampBrightnessToMinimum(finite(value), this._settings.get_int('minimum-brightness'));
+        const deviceValue = value;
         if (device.ddc) {
             device.error = '';
             device.requestedValue = value;
@@ -371,14 +369,11 @@ class BrightnessService {
         for (const device of this._displays) {
             if (device.backlight) {
                 const {brightness, brightnessMin, brightnessMax} = device.backlight;
-                const actual = normalizeBrightness(brightness, brightnessMin, brightnessMax);
-                device.value = actual === null ? device.value
-                    : brightnessFromDevice(actual, this._settings.get_int('minimum-brightness'));
+                device.value = normalizeBrightness(brightness, brightnessMin, brightnessMax) ?? device.value;
                 device.requestedValue = null;
                 this._saveConfirmed(device);
             } else if (device.nativeScale) {
-                device.value = brightnessFromDevice(finite(device.nativeScale.value),
-                    this._settings.get_int('minimum-brightness'));
+                device.value = finite(device.nativeScale.value);
                 device.requestedValue = null;
                 this._saveConfirmed(device);
             }

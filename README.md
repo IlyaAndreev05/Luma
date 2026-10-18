@@ -2,7 +2,7 @@
 
 Luma adds a compact display brightness control to GNOME 50 Quick Settings. Internal displays use GNOME's monitor backlight; external monitors use DDC/CI when available; monitors without a writable backlight can be dimmed in software.
 
-The brightness slider maps its minimum to a configurable safe floor (2–20%, default 2%) instead of turning the image fully black. The current percentage can be shown or hidden in Luma's settings.
+The brightness slider clamps output to a configurable safe floor (2–20%, default 2%) instead of turning the image fully black. Display percentages continue to match device readings. The current percentage can be shown or hidden in Luma's settings.
 
 ## Install
 

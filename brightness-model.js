@@ -12,16 +12,10 @@ export function normalizeBrightness(value, minimum, maximum) {
     return Math.min(1, Math.max(0, (value - minimum) / (maximum - minimum)));
 }
 
-export function brightnessToDevice(value, minimumPercent = 2) {
+export function clampBrightnessToMinimum(value, minimumPercent = 2) {
     const minimum = Math.min(20, Math.max(2, Number(minimumPercent) || 2)) / 100;
     const normalized = Math.min(1, Math.max(0, Number(value) || 0));
-    return minimum + normalized * (1 - minimum);
-}
-
-export function brightnessFromDevice(value, minimumPercent = 2) {
-    const minimum = Math.min(20, Math.max(2, Number(minimumPercent) || 2)) / 100;
-    const actual = Math.min(1, Math.max(0, Number(value) || 0));
-    return Math.min(1, Math.max(0, (actual - minimum) / (1 - minimum)));
+    return Math.max(minimum, normalized);
 }
 
 export function sameDisplayedPercent(displays) {
