@@ -548,7 +548,8 @@ class BrightnessPanel extends QuickSlider {
         this._deviceSection.addMenuItem(sliderItem);
 
         const error = new St.Label({text: '', style_class: 'dim-label', visible: false});
-        const errorItem = new PopupMenu.PopupBaseMenuItem({reactive: false, visible: false});
+        const errorItem = new PopupMenu.PopupBaseMenuItem({reactive: false});
+        errorItem.visible = false;
         errorItem.add_child(error);
         this._deviceSection.addMenuItem(errorItem);
         this._deviceSection.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
