@@ -27,6 +27,14 @@ export function retryDelay(failures) {
     return Math.min(60000, 2000 * (2 ** Math.min(Math.max(failures - 1, 0), 5)));
 }
 
+export function ddcReadingMatchesRequest(requested, actual, maximum = 100) {
+    if (!Number.isFinite(requested) || !Number.isFinite(actual))
+        return false;
+    const scale = Number.isFinite(maximum) && maximum > 0 ? maximum : 100;
+    const tolerance = Math.max(0.015, 1.5 / scale);
+    return Math.abs(requested - actual) <= tolerance;
+}
+
 export class DdcWriteQueue {
     constructor() {
         this.generation = 0;

@@ -9,10 +9,13 @@ import {QuickSlider, SystemIndicator} from 'resource:///org/gnome/shell/ui/quick
 import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 import {Slider} from 'resource:///org/gnome/shell/ui/slider.js';
 import {clampBrightnessToMinimum, normalizeBrightness, parseDdcDetection, parseDdcReading, retryDelay,
-    DdcWriteQueue, matchDdcDisplay, selectBrightnessBackend} from './brightness-model.js';
+    DdcWriteQueue, ddcReadingMatchesRequest, matchDdcDisplay, selectBrightnessBackend} from './brightness-model.js';
 
 const DDC_TIMEOUT_MS = 3000;
 const DDC_DEBOUNCE_MS = 100;
+const DDC_CONFIRM_DELAY_MS = 500;
+const DDC_CONFIRM_RETRY_MS = 400;
+const DDC_CONFIRM_MAX_ATTEMPTS = 4;
 function finite(value, fallback = 1) {
     return Number.isFinite(value) ? Math.clamp(value, 0, 1) : fallback;
 }
@@ -23,6 +26,8 @@ class DdcController {
         this.bus = bus;
         this.process = null;
         this.timer = 0;
+        this.confirmTimer = 0;
+        this.confirmation = null;
         this.writeQueue = new DdcWriteQueue();
         this.lastValue = null;
         this.failures = 0;
@@ -30,10 +35,16 @@ class DdcController {
         this.maximum = null;
         this.onChange = null;
         this.onFailure = null;
+        this.onMismatch = null;
+        this.onUnconfirmed = null;
         this.destroyed = false;
     }
 
     set(value) {
+        if (this.confirmTimer)
+            GLib.Source.remove(this.confirmTimer);
+        this.confirmTimer = 0;
+        this.confirmation = null;
         this.writeQueue.enqueue(finite(value), this.maximum || 100);
         this.failures = 0;
         this.nextRetryAt = 0;
@@ -55,40 +66,51 @@ class DdcController {
         if (this.timer)
             GLib.Source.remove(this.timer);
         this.timer = 0;
+        if (this.confirmTimer)
+            GLib.Source.remove(this.confirmTimer);
+        this.confirmTimer = 0;
         this.process?.force_exit();
     }
 
     resume() {
         this.paused = false;
-        this._scheduleWrite(DDC_DEBOUNCE_MS);
+        if (this.confirmation) {
+            const {generation, target, attempt} = this.confirmation;
+            this._scheduleConfirmation(generation, target, attempt, DDC_CONFIRM_DELAY_MS);
+        } else {
+            this._scheduleWrite(DDC_DEBOUNCE_MS);
+        }
     }
 
-    async read({allowPending = false, schedulePending = true} = {}) {
+    async read({allowPending = false, schedulePending = true, publish = true, confirm = false} = {}) {
         if (this.process || this.destroyed || this.paused || Date.now() < this.nextRetryAt)
-            return;
+            return null;
+        if (this.confirmation && !confirm)
+            return null;
         if (this.writeQueue.hasPending && !allowPending)
-            return;
+            return null;
         const generation = this.writeQueue.generation;
         try {
             const result = await this._run(['getvcp', '10']);
             if (result === null) {
                 if (this.writeQueue.isLatest(generation) && (allowPending || !this.writeQueue.hasPending))
                     this._failed();
-                return;
+                return null;
             }
             const reading = parseDdcReading(result);
             if (!reading) {
                 if (this.writeQueue.isLatest(generation) && (allowPending || !this.writeQueue.hasPending))
                     this._failed();
-                return;
+                return null;
             }
             this.failures = 0;
             this.nextRetryAt = 0;
             this.maximum = reading.maximum;
             this.lastValue = reading.value;
             // A poll that began before a newer request must never move its slider back.
-            if (this.writeQueue.canPublish(generation))
+            if (publish && this.writeQueue.canPublish(generation))
                 this.onChange?.(this.lastValue);
+            return reading;
         } finally {
             if (schedulePending && this.writeQueue.hasPending)
                 this._scheduleWrite(DDC_DEBOUNCE_MS);
@@ -121,10 +143,61 @@ class DdcController {
                 this._scheduleWrite(DDC_DEBOUNCE_MS);
             }
         } else if (this.writeQueue.canPublish(request.generation)) {
-            // A write request is not confirmation; read the monitor's actual value.
-            await this.read({schedulePending: false});
+            // DDC/CI writes can return before the monitor applies the new VCP value.
+            // Wait for the panel to settle, then publish only a matching read-back.
+            this._scheduleConfirmation(request.generation, request.value / (this.maximum || 100));
         }
         this._scheduleWrite(DDC_DEBOUNCE_MS);
+    }
+
+    _scheduleConfirmation(generation, target, attempt = 0, delay = DDC_CONFIRM_DELAY_MS) {
+        if (this.confirmTimer)
+            GLib.Source.remove(this.confirmTimer);
+        this.confirmTimer = 0;
+        this.confirmation = {generation, target, attempt};
+        if (this.destroyed || this.paused)
+            return;
+        this.confirmTimer = GLib.timeout_add(GLib.PRIORITY_DEFAULT, delay, () => {
+            this.confirmTimer = 0;
+            this._confirm(generation, target, attempt);
+            return GLib.SOURCE_REMOVE;
+        });
+    }
+
+    async _confirm(generation, target, attempt) {
+        if (!this.writeQueue.canPublish(generation)) {
+            this.confirmation = null;
+            return;
+        }
+
+        const reading = await this.read({schedulePending: false, publish: false, confirm: true});
+        if (!this.writeQueue.canPublish(generation)) {
+            this.confirmation = null;
+            this._scheduleWrite(DDC_DEBOUNCE_MS);
+            return;
+        }
+
+        if (!reading) {
+            if (attempt >= DDC_CONFIRM_MAX_ATTEMPTS) {
+                this.confirmation = null;
+                this.onUnconfirmed?.();
+                return;
+            }
+            const backoff = Math.max(DDC_CONFIRM_RETRY_MS, this.nextRetryAt - Date.now());
+            this._scheduleConfirmation(generation, target, attempt + 1, backoff);
+            return;
+        }
+
+        if (ddcReadingMatchesRequest(target, reading.value, reading.maximum)) {
+            this.confirmation = null;
+            this.onChange?.(reading.value);
+        } else if (attempt >= DDC_CONFIRM_MAX_ATTEMPTS) {
+            this.confirmation = null;
+            this.onChange?.(reading.value);
+            this.onMismatch?.();
+        } else {
+            this._scheduleConfirmation(generation, target, attempt + 1, DDC_CONFIRM_RETRY_MS);
+        }
     }
 
     _run(args) {
@@ -176,11 +249,17 @@ class DdcController {
         if (this.timer)
             GLib.Source.remove(this.timer);
         this.timer = 0;
+        if (this.confirmTimer)
+            GLib.Source.remove(this.confirmTimer);
+        this.confirmTimer = 0;
+        this.confirmation = null;
         this.process?.force_exit();
         this.process = null;
         this.writeQueue.clear();
         this.onChange = null;
         this.onFailure = null;
+        this.onMismatch = null;
+        this.onUnconfirmed = null;
     }
 }
 
@@ -195,7 +274,7 @@ class BrightnessService {
         this._pollDue = 0;
         this._monitorManager = global.backend.get_monitor_manager();
         this._monitorManager.connectObject('monitors-changed', () => this.refresh(), this);
-        Main.brightnessManager.connectObject('changed', () => this.refresh(), this);
+        Main.brightnessManager.connectObject('changed', () => this._readNative(), this);
         Main.brightnessManager.connectObject('user-update', () => this._readNative(), this);
         Main.sessionMode.connectObject('updated', () => {
             const paused = Main.sessionMode.isLocked || Main.sessionMode.isGreeter;
@@ -264,6 +343,15 @@ class BrightnessService {
                     };
                     device.ddc.onFailure = () => {
                         device.error = _('Could not read or apply monitor brightness; check DDC/CI and device access.');
+                        this._emit();
+                    };
+                    device.ddc.onMismatch = () => {
+                        device.error = _('The monitor reported a different brightness than requested.');
+                        this._emit();
+                    };
+                    device.ddc.onUnconfirmed = () => {
+                        device.requestedValue = null;
+                        device.error = _('The monitor did not confirm the requested brightness.');
                         this._emit();
                     };
                 }
@@ -526,7 +614,7 @@ class BrightnessPanel extends QuickSlider {
             const value = device.requestedValue ?? device.value;
             control.percentage.text = `${Math.round(value * 100)}%`;
             control.percentage.visible = this._settings.get_boolean('show-percentage');
-            control.method.text = this._methodLabel(device);
+            control.method.text = this._methodLabel(device, device.requestedValue !== undefined && device.requestedValue !== null);
             if (!control.adjusting) {
                 this._syncingMenuSlider = true;
                 control.slider.value = value;
@@ -538,10 +626,11 @@ class BrightnessPanel extends QuickSlider {
         }
     }
 
-    _methodLabel(device) {
-        return device.ddc ? _('DDC/CI monitor brightness')
+    _methodLabel(device, pending = false) {
+        const method = device.ddc ? _('DDC/CI monitor brightness')
             : device.backend === 'mutter' ? _('System brightness control')
                 : _('Software dimming');
+        return pending ? `${method} · ${_('Applying…')}` : method;
     }
 
     _addDisplayControls(device) {
@@ -549,7 +638,11 @@ class BrightnessPanel extends QuickSlider {
         this._deviceSection.addMenuItem(title);
 
         const info = new St.BoxLayout({x_expand: true});
-        const method = new St.Label({text: this._methodLabel(device), style_class: 'dim-label', x_expand: true});
+        const method = new St.Label({
+            text: this._methodLabel(device, device.requestedValue !== undefined && device.requestedValue !== null),
+            style_class: 'dim-label',
+            x_expand: true,
+        });
         const percentage = new St.Label({text: `${Math.round((device.requestedValue ?? device.value) * 100)}%`, style_class: 'dim-label'});
         percentage.visible = this._settings.get_boolean('show-percentage');
         info.add_child(method);

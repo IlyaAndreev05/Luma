@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {clampBrightnessToMinimum, normalizeBrightness, parseDdcBrightness, parseDdcDetection,
-    DdcWriteQueue, matchDdcDisplay, normalizeConnector, parseDdcReading, retryDelay,
+    DdcWriteQueue, ddcReadingMatchesRequest, matchDdcDisplay, normalizeConnector, parseDdcReading, retryDelay,
     sameDisplayedPercent, selectBrightnessBackend} from '../brightness-model.js';
 
 test('selects native backlight before DDC/CI and software', () => {
@@ -37,6 +37,13 @@ test('detects equality using the displayed whole percentages', () => {
 test('bounds exponential DDC retry delay at one minute', () => {
     assert.deepEqual([1, 2, 3, 4, 5, 6, 10].map(retryDelay),
         [2000, 4000, 8000, 16000, 32000, 60000, 60000]);
+});
+
+test('accepts only a near-enough hardware confirmation for a DDC request', () => {
+    assert.equal(ddcReadingMatchesRequest(.51, .5, 100), true);
+    assert.equal(ddcReadingMatchesRequest(.51, .47, 100), false);
+    assert.equal(ddcReadingMatchesRequest(.2, .19, 255), true);
+    assert.equal(ddcReadingMatchesRequest(.5, Number.NaN, 100), false);
 });
 
 test('coalesces DDC writes and never publishes or retries an obsolete in-flight value', () => {
