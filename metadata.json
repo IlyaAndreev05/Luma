@@ -3,7 +3,7 @@
   "gettext-domain": "luma@ilyaandreev05.github.io",
   "name": "Luma — Display Brightness",
   "description": "A unified, per-display brightness control for GNOME Quick Settings.",
-  "version": 6,
+  "version": 7,
   "shell-version": ["50"],
   "settings-schema": "io.github.ilyaandreev05.luma"
 }

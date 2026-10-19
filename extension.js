@@ -9,7 +9,7 @@ import {QuickSlider, SystemIndicator} from 'resource:///org/gnome/shell/ui/quick
 import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 import {Slider} from 'resource:///org/gnome/shell/ui/slider.js';
 import {clampBrightnessToMinimum, normalizeBrightness, parseDdcDetection, parseDdcReading, retryDelay,
-    matchDdcDisplay, selectBrightnessBackend} from './brightness-model.js';
+    DdcWriteQueue, matchDdcDisplay, selectBrightnessBackend} from './brightness-model.js';
 
 const DDC_TIMEOUT_MS = 3000;
 const DDC_DEBOUNCE_MS = 100;
@@ -23,7 +23,7 @@ class DdcController {
         this.bus = bus;
         this.process = null;
         this.timer = 0;
-        this.pendingValue = null;
+        this.writeQueue = new DdcWriteQueue();
         this.lastValue = null;
         this.failures = 0;
         this.nextRetryAt = 0;
@@ -34,15 +34,14 @@ class DdcController {
     }
 
     set(value) {
-        this._requestedNormalized = finite(value);
-        this.pendingValue = Math.round(this._requestedNormalized * (this.maximum || 100));
+        this.writeQueue.enqueue(finite(value), this.maximum || 100);
         this.failures = 0;
         this.nextRetryAt = 0;
         this._scheduleWrite(DDC_DEBOUNCE_MS);
     }
 
     _scheduleWrite(delay) {
-        if (this.timer || this.process || this.destroyed || this.paused || this.pendingValue === null)
+        if (this.timer || this.process || this.destroyed || this.paused || !this.writeQueue.hasPending)
             return;
         this.timer = GLib.timeout_add(GLib.PRIORITY_DEFAULT, delay, () => {
             this.timer = 0;
@@ -64,46 +63,66 @@ class DdcController {
         this._scheduleWrite(DDC_DEBOUNCE_MS);
     }
 
-    async read() {
+    async read({allowPending = false, schedulePending = true} = {}) {
         if (this.process || this.destroyed || this.paused || Date.now() < this.nextRetryAt)
             return;
-        const result = await this._run(['getvcp', '10']);
-        if (result === null) {
-            this._failed();
+        if (this.writeQueue.hasPending && !allowPending)
             return;
+        const generation = this.writeQueue.generation;
+        try {
+            const result = await this._run(['getvcp', '10']);
+            if (result === null) {
+                if (this.writeQueue.isLatest(generation) && (allowPending || !this.writeQueue.hasPending))
+                    this._failed();
+                return;
+            }
+            const reading = parseDdcReading(result);
+            if (!reading) {
+                if (this.writeQueue.isLatest(generation) && (allowPending || !this.writeQueue.hasPending))
+                    this._failed();
+                return;
+            }
+            this.failures = 0;
+            this.nextRetryAt = 0;
+            this.maximum = reading.maximum;
+            this.lastValue = reading.value;
+            // A poll that began before a newer request must never move its slider back.
+            if (this.writeQueue.canPublish(generation))
+                this.onChange?.(this.lastValue);
+        } finally {
+            if (schedulePending && this.writeQueue.hasPending)
+                this._scheduleWrite(DDC_DEBOUNCE_MS);
         }
-        const reading = parseDdcReading(result);
-        if (!reading) {
-            this._failed();
-            return;
-        }
-        this.failures = 0;
-        this.nextRetryAt = 0;
-        this.maximum = reading.maximum;
-        this.lastValue = reading.value;
-        this.onChange?.(this.lastValue);
     }
 
     async _write() {
-        if (this.pendingValue === null || this.process || this.destroyed)
+        if (!this.writeQueue.hasPending || this.process || this.destroyed)
             return;
         if (!this.maximum) {
-            await this.read();
+            // Read the device range before the first write, without publishing the
+            // old hardware value over the user's pending slider position.
+            await this.read({allowPending: true, schedulePending: false});
             if (!this.maximum) {
                 this._scheduleWrite(retryDelay(Math.max(1, this.failures)));
                 return;
             }
         }
-        this.pendingValue = Math.round(this._requestedNormalized * this.maximum);
-        const value = this.pendingValue;
-        this.pendingValue = null;
-        const result = await this._run(['setvcp', '10', String(value)]);
+        const request = this.writeQueue.take(this.maximum);
+        if (!request)
+            return;
+        const result = await this._run(['setvcp', '10', String(request.value)]);
         if (result === null) {
-            this.pendingValue = value;
-            this._scheduleWrite(retryDelay(Math.max(1, this.failures)));
-        } else {
+            // Don't requeue an obsolete value if the user moved the slider while
+            // this DDC/CI command was still running.
+            if (this.writeQueue.retry(request)) {
+                const delay = this._failed() || retryDelay(Math.max(1, this.failures));
+                this._scheduleWrite(delay);
+            } else {
+                this._scheduleWrite(DDC_DEBOUNCE_MS);
+            }
+        } else if (this.writeQueue.canPublish(request.generation)) {
             // A write request is not confirmation; read the monitor's actual value.
-            await this.read();
+            await this.read({schedulePending: false});
         }
         this._scheduleWrite(DDC_DEBOUNCE_MS);
     }
@@ -159,7 +178,7 @@ class DdcController {
         this.timer = 0;
         this.process?.force_exit();
         this.process = null;
-        this.pendingValue = null;
+        this.writeQueue.clear();
         this.onChange = null;
         this.onFailure = null;
     }
@@ -244,7 +263,6 @@ class BrightnessService {
                         this._emit();
                     };
                     device.ddc.onFailure = () => {
-                        device.requestedValue = null;
                         device.error = _('Could not read or apply monitor brightness; check DDC/CI and device access.');
                         this._emit();
                     };

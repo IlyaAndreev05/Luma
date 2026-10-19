@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {clampBrightnessToMinimum, normalizeBrightness, parseDdcBrightness, parseDdcDetection,
-    matchDdcDisplay, normalizeConnector, parseDdcReading, retryDelay,
+    DdcWriteQueue, matchDdcDisplay, normalizeConnector, parseDdcReading, retryDelay,
     sameDisplayedPercent, selectBrightnessBackend} from '../brightness-model.js';
 
 test('selects native backlight before DDC/CI and software', () => {
@@ -37,6 +37,35 @@ test('detects equality using the displayed whole percentages', () => {
 test('bounds exponential DDC retry delay at one minute', () => {
     assert.deepEqual([1, 2, 3, 4, 5, 6, 10].map(retryDelay),
         [2000, 4000, 8000, 16000, 32000, 60000, 60000]);
+});
+
+test('coalesces DDC writes and never publishes or retries an obsolete in-flight value', () => {
+    const queue = new DdcWriteQueue();
+    queue.enqueue(.9);
+    queue.enqueue(.8);
+    queue.enqueue(.2);
+
+    const older = queue.take(100);
+    assert.deepEqual(older, {generation: 3, value: 20});
+
+    queue.enqueue(.3);
+    assert.equal(queue.canPublish(older.generation), false);
+    assert.equal(queue.retry(older), false);
+    assert.deepEqual(queue.take(100), {generation: 4, value: 30});
+});
+
+test('converts the latest normalized DDC request using the monitor maximum and retries only current writes', () => {
+    const queue = new DdcWriteQueue();
+    queue.enqueue(.2);
+    const request = queue.take(255);
+    assert.deepEqual(request, {generation: 1, value: 51});
+    assert.equal(queue.retry(request), true);
+    assert.equal(queue.pendingValue, 51);
+
+    queue.enqueue(.3, 255);
+    assert.equal(queue.retry(request), false);
+    assert.deepEqual(queue.take(255), {generation: 2, value: 77});
+    assert.equal(queue.canPublish(2), true);
 });
 
 test('parses DDC current and maximum brightness values', () => {

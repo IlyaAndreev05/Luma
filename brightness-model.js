@@ -27,6 +27,60 @@ export function retryDelay(failures) {
     return Math.min(60000, 2000 * (2 ** Math.min(Math.max(failures - 1, 0), 5)));
 }
 
+export class DdcWriteQueue {
+    constructor() {
+        this.generation = 0;
+        this.pendingValue = null;
+        this.normalizedValue = null;
+    }
+
+    enqueue(value, maximum = 100) {
+        const normalized = Number.isFinite(value) ? Math.min(1, Math.max(0, value)) : 1;
+        const scale = Number.isFinite(maximum) && maximum > 0 ? maximum : 100;
+        this.generation++;
+        this.normalizedValue = normalized;
+        this.pendingValue = Math.round(normalized * scale);
+        return this.generation;
+    }
+
+    get hasPending() {
+        return this.pendingValue !== null;
+    }
+
+    isLatest(generation) {
+        return generation === this.generation;
+    }
+
+    canPublish(generation) {
+        return this.isLatest(generation) && !this.hasPending;
+    }
+
+    take(maximum) {
+        if (!this.hasPending)
+            return null;
+        const scale = Number.isFinite(maximum) && maximum > 0 ? maximum : 100;
+        const request = {
+            generation: this.generation,
+            value: Math.round(this.normalizedValue * scale),
+        };
+        this.pendingValue = null;
+        return request;
+    }
+
+    retry(request) {
+        if (!this.canPublish(request.generation))
+            return false;
+        this.pendingValue = request.value;
+        return true;
+    }
+
+    clear() {
+        this.generation++;
+        this.pendingValue = null;
+        this.normalizedValue = null;
+    }
+}
+
 export function parseDdcReading(output) {
     const match = output.match(/current value\s*=\s*(\d+)\s*,\s*max value\s*=\s*(\d+)/i) ||
         output.match(/current value\s*=\s*(\d+)/i);
