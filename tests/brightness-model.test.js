@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import {brightnessToSliderPosition, clampBrightnessToMinimum, combinedBrightness, normalizeBrightness, parseDdcBrightness, parseDdcDetection,
+import {brightnessToSliderPosition, clampBrightnessToMinimum, combinedBrightness, displayBrightnessFromOutput, normalizeBrightness, parseDdcBrightness, parseDdcDetection,
     DdcWriteQueue, ddcReadingMatchesRequest, matchDdcDisplay, normalizeConnector, parseDdcReading, retryDelay,
     sameDisplayedPercent, selectBrightnessBackend, sliderPositionToBrightness} from '../brightness-model.js';
 
@@ -45,11 +45,13 @@ test('keeps overall and per-display brightness independent and combines them onl
     assert.equal(displayBrightness, .3);
     assert.equal(combinedBrightness(1, displayBrightness), .3);
     assert.equal(combinedBrightness(globalBrightness, 1), .5);
+    assert.ok(Math.abs(displayBrightnessFromOutput(.4, .5) - .8) < 1e-12);
 });
 
-test('combined brightness never reaches zero at either slider minimum', () => {
-    assert.equal(combinedBrightness(0, 0, 2), .0004);
-    assert.ok(combinedBrightness(0, 0, 2) > 0);
+test('combined output respects the configured safe minimum', () => {
+    assert.equal(combinedBrightness(0, 0, 2), .02);
+    assert.equal(combinedBrightness(.5, .3, 10), .15);
+    assert.equal(combinedBrightness(.02, .02, 10), .1);
 });
 
 test('detects equality using the displayed whole percentages', () => {

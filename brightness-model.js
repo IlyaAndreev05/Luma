@@ -19,8 +19,16 @@ export function clampBrightnessToMinimum(value, minimumPercent = 2) {
 }
 
 export function combinedBrightness(globalValue, displayValue, minimumPercent = 2) {
-    return clampBrightnessToMinimum(globalValue, minimumPercent) *
-        clampBrightnessToMinimum(displayValue, minimumPercent);
+    const minimum = Math.min(20, Math.max(2, Number(minimumPercent) || 2)) / 100;
+    return Math.max(minimum,
+        clampBrightnessToMinimum(globalValue, minimumPercent) *
+        clampBrightnessToMinimum(displayValue, minimumPercent));
+}
+
+export function displayBrightnessFromOutput(outputValue, globalValue, minimumPercent = 2) {
+    const output = Math.min(1, Math.max(0, Number(outputValue) || 0));
+    const overall = clampBrightnessToMinimum(globalValue, minimumPercent);
+    return clampBrightnessToMinimum(output / overall, minimumPercent);
 }
 
 export function brightnessToSliderPosition(value, minimumPercent = 2) {

@@ -8,7 +8,7 @@ import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import {QuickSlider, SystemIndicator} from 'resource:///org/gnome/shell/ui/quickSettings.js';
 import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 import {Slider} from 'resource:///org/gnome/shell/ui/slider.js';
-import {brightnessToSliderPosition, clampBrightnessToMinimum, combinedBrightness, normalizeBrightness, parseDdcDetection,
+import {brightnessToSliderPosition, clampBrightnessToMinimum, combinedBrightness, displayBrightnessFromOutput, normalizeBrightness, parseDdcDetection,
     parseDdcReading, retryDelay, sliderPositionToBrightness, DdcWriteQueue,
     ddcReadingMatchesRequest, matchDdcDisplay, selectBrightnessBackend} from './brightness-model.js';
 
@@ -110,7 +110,7 @@ class DdcController {
             this.lastValue = reading.value;
             // A poll that began before a newer request must never move its slider back.
             if (publish && this.writeQueue.canPublish(generation))
-                this.onChange?.(this.lastValue);
+                this.onChange?.(this.lastValue, false, false);
             return reading;
         } finally {
             if (schedulePending && this.writeQueue.hasPending)
@@ -191,10 +191,10 @@ class DdcController {
 
         if (ddcReadingMatchesRequest(target, reading.value, reading.maximum)) {
             this.confirmation = null;
-            this.onChange?.(reading.value);
+            this.onChange?.(reading.value, true);
         } else if (attempt >= DDC_CONFIRM_MAX_ATTEMPTS) {
             this.confirmation = null;
-            this.onChange?.(reading.value);
+            this.onChange?.(reading.value, false, true);
             this.onMismatch?.();
         } else {
             this._scheduleConfirmation(generation, target, attempt + 1, DDC_CONFIRM_RETRY_MS);
@@ -274,11 +274,15 @@ class BrightnessService {
         this._pollTimer = 0;
         this._pollDue = 0;
         this._monitorManager = global.backend.get_monitor_manager();
+        this._lastAppliedGlobalPercent = this._settings.get_int('global-brightness');
         this._settings.connectObject('changed::global-brightness', () => {
-            this._applyBrightnessOverlays();
-            this._emit();
+            const percent = this._settings.get_int('global-brightness');
+            if (percent === this._lastAppliedGlobalPercent)
+                return;
+            this._lastAppliedGlobalPercent = percent;
+            this._applyOverallBrightness();
         }, this);
-        this._settings.connectObject('changed::minimum-brightness', () => this._applyBrightnessOverlays(), this);
+        this._settings.connectObject('changed::minimum-brightness', () => this._applyOverallBrightness(), this);
         this._monitorManager.connectObject('monitors-changed', () => this.refresh(), this);
         Main.brightnessManager.connectObject('changed', () => this._readNative(), this);
         Main.brightnessManager.connectObject('user-update', () => this._readNative(), this);
@@ -337,16 +341,13 @@ class BrightnessService {
                     backend,
                     value: finite(value, 1),
                     softwareValue: finite(value, 1),
+                    hardwareValue: backend === 'software' || value === undefined || value === null ? null : finite(value, 1),
+                    hardwareInitialized: backend !== 'ddc' && (value !== undefined && value !== null),
                     error: '',
                 };
                 if (device.ddc) {
-                    device.ddc.onChange = actual => {
-                        device.value = actual;
-                        device.requestedValue = null;
-                        device.error = '';
-                        this._saveConfirmed(device);
-                        this._emit();
-                    };
+                    device.ddc.onChange = (actual, confirmed = false, mismatch = false) =>
+                        this._acceptHardwareBrightness(device, actual, confirmed, mismatch);
                     device.ddc.onFailure = () => {
                         device.error = _('Could not read or apply monitor brightness; check DDC/CI and device access.');
                         this._emit();
@@ -357,16 +358,21 @@ class BrightnessService {
                     };
                     device.ddc.onUnconfirmed = () => {
                         device.requestedValue = null;
+                        device.requestedOutputValue = null;
                         device.error = _('The monitor did not confirm the requested brightness.');
                         this._emit();
                     };
                 }
                 this._displays.push(device);
                 this._applyBrightnessOverlay(device);
+                const saved = this._settings.get_value('saved-brightness').deep_unpack();
                 if (this._settings.get_boolean('restore-brightness')) {
-                    const saved = this._settings.get_value('saved-brightness').deep_unpack();
                     if (saved[device.id] !== undefined)
                         this.setBrightness(device.id, saved[device.id]);
+                    else if (device.backend !== 'software' && device.backend !== 'ddc')
+                        this._initializeHardwareBrightness(device, undefined);
+                } else if (device.backend !== 'software' && device.backend !== 'ddc') {
+                    this._initializeHardwareBrightness(device, saved[device.id]);
                 }
             }
         }
@@ -417,26 +423,41 @@ class BrightnessService {
         const device = this._displays.find(d => d.id === id);
         if (!device)
             return;
-        value = clampBrightnessToMinimum(finite(value), this._settings.get_int('minimum-brightness'));
-        const deviceValue = value;
+        const minimum = this._settings.get_int('minimum-brightness');
+        value = clampBrightnessToMinimum(finite(value), minimum);
+        const outputValue = combinedBrightness(this.globalBrightness, value, minimum);
+        if (!device.ddc && device.backend === 'mutter' && device.hardwareValue !== null &&
+            (device.requestedValue === undefined || device.requestedValue === null) &&
+            ddcReadingMatchesRequest(outputValue, device.hardwareValue, 100)) {
+            device.value = value;
+            device.requestedOutputValue = null;
+            this._saveConfirmed(device);
+            this._emit();
+            return;
+        }
         if (device.ddc) {
             device.error = '';
             device.requestedValue = value;
-            device.ddc.set(deviceValue);
+            device.requestedOutputValue = outputValue;
+            device.ddc.set(outputValue);
             this._emit();
             return;
         }
         if (device.backend === 'mutter' && device.backlight) {
             const {brightnessMin, brightnessMax} = device.backlight;
-            device.backlight.brightness = Math.round(brightnessMin + deviceValue * (brightnessMax - brightnessMin));
             device.requestedValue = value;
+            device.requestedOutputValue = outputValue;
+            device.backlight.brightness = Math.round(brightnessMin + outputValue * (brightnessMax - brightnessMin));
         } else if (device.backend === 'mutter' && device.nativeScale) {
             device.requestedValue = value;
-            device.nativeScale.value = deviceValue;
+            device.requestedOutputValue = outputValue;
+            device.nativeScale.value = outputValue;
         } else {
             // Software dimming is explicitly shown in the UI and never changes the reported hardware level.
             device.softwareValue = value;
             device.value = value;
+            device.requestedValue = null;
+            device.requestedOutputValue = null;
             this._applyBrightnessOverlay(device);
             this._saveConfirmed(device);
         }
@@ -453,13 +474,92 @@ class BrightnessService {
         const minimum = this._settings.get_int('minimum-brightness');
         const value = device.backend === 'software'
             ? combinedBrightness(this.globalBrightness, device.softwareValue ?? device.value, minimum)
-            : this.globalBrightness;
+            : 1;
         this._setOverlay(device, value);
     }
 
-    _applyBrightnessOverlays() {
-        for (const device of this._displays)
-            this._applyBrightnessOverlay(device);
+    _applyOverallBrightness() {
+        const wasBatching = this._batch;
+        this._batch = true;
+        try {
+            for (const device of this._displays) {
+                if (device.backend === 'software')
+                    this._applyBrightnessOverlay(device);
+                else if (device.ddc && !device.hardwareInitialized &&
+                    (device.requestedValue === undefined || device.requestedValue === null))
+                    continue;
+                else
+                    this.setBrightness(device.id, device.requestedValue ?? device.value);
+            }
+        } finally {
+            this._batch = wasBatching;
+        }
+        this._emit();
+    }
+
+    _acceptHardwareBrightness(device, actual, confirmed = false, mismatch = false) {
+        const minimum = this._settings.get_int('minimum-brightness');
+        const previousHardwareValue = device.hardwareValue;
+        const firstReading = !device.hardwareInitialized;
+        const changed = previousHardwareValue === null || Math.abs(actual - previousHardwareValue) > .015;
+        const requested = device.requestedValue;
+
+        if (requested !== undefined && requested !== null && !confirmed && !mismatch && !changed)
+            return;
+
+        let localValue;
+        if (confirmed && requested !== undefined && requested !== null) {
+            localValue = requested;
+        } else if (firstReading) {
+            const saved = this._settings.get_value('saved-brightness').deep_unpack()[device.id];
+            const savedOutput = saved === undefined ? null : combinedBrightness(this.globalBrightness, saved, minimum);
+            if (this._settings.get_boolean('restore-brightness') && saved !== undefined) {
+                localValue = saved;
+            } else if (savedOutput !== null && ddcReadingMatchesRequest(savedOutput, actual, 100)) {
+                localValue = saved;
+            } else {
+                localValue = actual;
+            }
+        } else if ((requested !== undefined && requested !== null) || changed) {
+            localValue = displayBrightnessFromOutput(actual, this.globalBrightness, minimum);
+        } else {
+            localValue = device.value;
+        }
+
+        device.hardwareValue = actual;
+        device.hardwareInitialized = true;
+        device.value = clampBrightnessToMinimum(localValue, minimum);
+        device.requestedValue = null;
+        device.requestedOutputValue = null;
+        device.error = '';
+        this._saveConfirmed(device);
+
+        if (!confirmed && !mismatch && (firstReading || changed)) {
+            const expected = combinedBrightness(this.globalBrightness, device.value, minimum);
+            if (!ddcReadingMatchesRequest(expected, actual, 100)) {
+                this.setBrightness(device.id, device.value);
+                return;
+            }
+        }
+
+        this._emit();
+    }
+
+    _initializeHardwareBrightness(device, savedValue) {
+        const minimum = this._settings.get_int('minimum-brightness');
+        let localValue = device.value;
+        if (savedValue !== undefined && device.hardwareValue !== null) {
+            const savedOutput = combinedBrightness(this.globalBrightness, savedValue, minimum);
+            localValue = ddcReadingMatchesRequest(savedOutput, device.hardwareValue, 100)
+                ? savedValue
+                : displayBrightnessFromOutput(device.hardwareValue, this.globalBrightness, minimum);
+        }
+        device.value = clampBrightnessToMinimum(localValue, minimum);
+        const expectedOutput = combinedBrightness(this.globalBrightness, device.value, minimum);
+        if (!ddcReadingMatchesRequest(expectedOutput, device.hardwareValue, 100))
+            this.setBrightness(device.id, device.value);
+        else
+            this._saveConfirmed(device);
     }
 
     _setOverlay(device, value) {
@@ -488,9 +588,9 @@ class BrightnessService {
     setGlobalBrightness(value) {
         const minimum = this._settings.get_int('minimum-brightness');
         const percent = Math.round(clampBrightnessToMinimum(value, minimum) * 100);
+        this._lastAppliedGlobalPercent = percent;
         this._settings.set_int('global-brightness', percent);
-        this._applyBrightnessOverlays();
-        this._emit();
+        this._applyOverallBrightness();
     }
 
     _saveConfirmed(device) {
@@ -500,17 +600,27 @@ class BrightnessService {
     }
 
     _readNative() {
-        for (const device of this._displays) {
-            if (device.backlight) {
-                const {brightness, brightnessMin, brightnessMax} = device.backlight;
-                device.value = normalizeBrightness(brightness, brightnessMin, brightnessMax) ?? device.value;
-                device.requestedValue = null;
-                this._saveConfirmed(device);
-            } else if (device.nativeScale) {
-                device.value = finite(device.nativeScale.value);
-                device.requestedValue = null;
-                this._saveConfirmed(device);
+        const wasBatching = this._batch;
+        this._batch = true;
+        try {
+            for (const device of this._displays) {
+                if (device.backlight) {
+                    const {brightness, brightnessMin, brightnessMax} = device.backlight;
+                    const actual = normalizeBrightness(brightness, brightnessMin, brightnessMax);
+                    if (actual !== null) {
+                        const confirmed = device.requestedValue !== undefined && device.requestedValue !== null &&
+                            ddcReadingMatchesRequest(device.requestedOutputValue, actual, 100);
+                        this._acceptHardwareBrightness(device, actual, confirmed);
+                    }
+                } else if (device.nativeScale) {
+                    const actual = finite(device.nativeScale.value);
+                    const confirmed = device.requestedValue !== undefined && device.requestedValue !== null &&
+                        ddcReadingMatchesRequest(device.requestedOutputValue, actual, 100);
+                    this._acceptHardwareBrightness(device, actual, confirmed);
+                }
             }
+        } finally {
+            this._batch = wasBatching;
         }
         this._emit();
     }
@@ -546,7 +656,8 @@ class BrightnessService {
     }
 
     _emit() {
-        this._onChanged(this._displays);
+        if (!this._batch)
+            this._onChanged(this._displays);
     }
 
     destroy() {
