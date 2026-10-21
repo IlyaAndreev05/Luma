@@ -21,7 +21,7 @@ export default class LumaPreferences extends ExtensionPreferences {
         settings.bind('show-percentage', showPercentage, 'active', Gio.SettingsBindFlags.DEFAULT);
         const minimum = new Adw.SpinRow({
             title: _('Minimum brightness'),
-            subtitle: _('The lowest slider position stays above black to keep the screen visible.'),
+            subtitle: _('The lowest position of each brightness slider stays above black to keep the screen visible.'),
             adjustment: new Gtk.Adjustment({value: settings.get_int('minimum-brightness'), lower: 2, upper: 20, step_increment: 1, page_increment: 2}),
         });
         settings.bind('minimum-brightness', minimum, 'value', Gio.SettingsBindFlags.DEFAULT);

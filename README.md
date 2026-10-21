@@ -2,6 +2,8 @@
 
 Luma adds a compact display brightness control below the output and microphone sliders in GNOME 50 Quick Settings, before the Wi-Fi and Bluetooth tiles. Internal displays use GNOME's monitor backlight; external monitors use DDC/CI when available; monitors without a writable backlight can be dimmed in software.
 
+The main slider is an independent overall dimmer. Each display's slider controls only that display's hardware brightness (or its local software dimming level); it is never changed when the overall slider moves. The visible result combines the two levels, so an overall level of 50% and a display level of 80% produce about 40% output. The overall level is saved separately and also applies to newly connected displays.
+
 The brightness slider maps its left edge to a configurable safe floor (2–20%, default 2%) instead of turning the image fully black. Display percentages continue to match device readings. The current percentage can be shown or hidden in Luma's settings.
 
 ## Install

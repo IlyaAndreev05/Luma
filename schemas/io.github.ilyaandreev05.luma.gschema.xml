@@ -6,5 +6,6 @@
     <key name="ddc-refresh-seconds" type="i"><default>10</default><range min="2" max="60"/></key>
     <key name="show-percentage" type="b"><default>false</default><summary>Show brightness percentages</summary></key>
     <key name="minimum-brightness" type="i"><default>2</default><range min="2" max="20"/><summary>Safe minimum brightness percentage</summary></key>
+    <key name="global-brightness" type="i"><default>100</default><range min="2" max="100"/><summary>Overall display brightness multiplier</summary></key>
   </schema>
 </schemalist>

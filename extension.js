@@ -8,7 +8,7 @@ import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import {QuickSlider, SystemIndicator} from 'resource:///org/gnome/shell/ui/quickSettings.js';
 import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 import {Slider} from 'resource:///org/gnome/shell/ui/slider.js';
-import {brightnessToSliderPosition, clampBrightnessToMinimum, normalizeBrightness, parseDdcDetection,
+import {brightnessToSliderPosition, clampBrightnessToMinimum, combinedBrightness, normalizeBrightness, parseDdcDetection,
     parseDdcReading, retryDelay, sliderPositionToBrightness, DdcWriteQueue,
     ddcReadingMatchesRequest, matchDdcDisplay, selectBrightnessBackend} from './brightness-model.js';
 
@@ -274,6 +274,11 @@ class BrightnessService {
         this._pollTimer = 0;
         this._pollDue = 0;
         this._monitorManager = global.backend.get_monitor_manager();
+        this._settings.connectObject('changed::global-brightness', () => {
+            this._applyBrightnessOverlays();
+            this._emit();
+        }, this);
+        this._settings.connectObject('changed::minimum-brightness', () => this._applyBrightnessOverlays(), this);
         this._monitorManager.connectObject('monitors-changed', () => this.refresh(), this);
         Main.brightnessManager.connectObject('changed', () => this._readNative(), this);
         Main.brightnessManager.connectObject('user-update', () => this._readNative(), this);
@@ -357,6 +362,7 @@ class BrightnessService {
                     };
                 }
                 this._displays.push(device);
+                this._applyBrightnessOverlay(device);
                 if (this._settings.get_boolean('restore-brightness')) {
                     const saved = this._settings.get_value('saved-brightness').deep_unpack();
                     if (saved[device.id] !== undefined)
@@ -431,13 +437,33 @@ class BrightnessService {
             // Software dimming is explicitly shown in the UI and never changes the reported hardware level.
             device.softwareValue = value;
             device.value = value;
-            this._setOverlay(device, deviceValue);
+            this._applyBrightnessOverlay(device);
             this._saveConfirmed(device);
         }
         this._emit();
     }
 
+    get globalBrightness() {
+        return clampBrightnessToMinimum(
+            this._settings.get_int('global-brightness') / 100,
+            this._settings.get_int('minimum-brightness'));
+    }
+
+    _applyBrightnessOverlay(device) {
+        const minimum = this._settings.get_int('minimum-brightness');
+        const value = device.backend === 'software'
+            ? combinedBrightness(this.globalBrightness, device.softwareValue ?? device.value, minimum)
+            : this.globalBrightness;
+        this._setOverlay(device, value);
+    }
+
+    _applyBrightnessOverlays() {
+        for (const device of this._displays)
+            this._applyBrightnessOverlay(device);
+    }
+
     _setOverlay(device, value) {
+        value = Math.min(1, Math.max(0, finite(value, 1)));
         if (value >= .999) {
             device.overlay?.destroy();
             device.overlay = null;
@@ -459,10 +485,11 @@ class BrightnessService {
             device.overlay.set_position(monitor.x, monitor.y), device.overlay.set_size(monitor.width, monitor.height);
     }
 
-    setAll(value) {
-        this._batch = true;
-        this._displays.forEach(d => this.setBrightness(d.id, value));
-        this._batch = false;
+    setGlobalBrightness(value) {
+        const minimum = this._settings.get_int('minimum-brightness');
+        const percent = Math.round(clampBrightnessToMinimum(value, minimum) * 100);
+        this._settings.set_int('global-brightness', percent);
+        this._applyBrightnessOverlays();
         this._emit();
     }
 
@@ -519,8 +546,7 @@ class BrightnessService {
     }
 
     _emit() {
-        if (!this._batch)
-            this._onChanged(this._displays);
+        this._onChanged(this._displays);
     }
 
     destroy() {
@@ -529,6 +555,7 @@ class BrightnessService {
         this._monitorManager.disconnectObject(this);
         Main.brightnessManager.disconnectObject(this);
         Main.sessionMode.disconnectObject(this);
+        this._settings.disconnectObject(this);
         this._destroyDevices();
     }
 }
@@ -538,7 +565,7 @@ class BrightnessPanel extends QuickSlider {
     _init(owner, service) {
         super._init({
             iconName: 'display-brightness-symbolic',
-            iconLabel: _('Display brightness'),
+            iconLabel: _('Overall display brightness'),
             menuEnabled: true,
             menuButtonAccessibleName: _('Open display brightness menu'),
         });
@@ -546,10 +573,10 @@ class BrightnessPanel extends QuickSlider {
         this._service = service;
         this._settings = owner.settings;
         this._devices = [];
-        this.slider.accessible_name = _('Brightness for all displays');
+        this.slider.accessible_name = _('Overall brightness for all displays');
         this.slider.connect('notify::value', () => {
             if (!this._syncingMainSlider)
-                this._service.setAll(this._brightnessAtSliderPosition(this.slider.value));
+                this._service.setGlobalBrightness(this._brightnessAtSliderPosition(this.slider.value));
         });
 
         this._mainPercentage = new St.Label({text: '100%', style_class: 'dim-label'});
@@ -560,9 +587,9 @@ class BrightnessPanel extends QuickSlider {
             style_class: 'button',
             style: 'min-width: 40px; max-width: 40px; min-height: 40px; max-height: 40px; padding: 0; border-radius: 20px; font-size: 9pt;',
             can_focus: true,
-            accessible_name: _('Set all displays to 100 percent'),
+            accessible_name: _('Set overall brightness to 100 percent'),
         });
-        this._resetButton.connect('clicked', () => this._service.setAll(1));
+        this._resetButton.connect('clicked', () => this._service.setGlobalBrightness(1));
         // QuickSlider supplies GNOME's themed slider and compact menu arrow.
         // Insert the reset action immediately before that arrow.
         const controls = this.get_child();
@@ -572,7 +599,7 @@ class BrightnessPanel extends QuickSlider {
         owner.settings.connectObject('changed::show-percentage', () => this._syncMenu(this._devices), this);
         owner.settings.connectObject('changed::minimum-brightness', () => this.update(this._devices), this);
 
-        this.menu.setHeader('display-brightness-symbolic', _('Display brightness'));
+        this.menu.setHeader('display-brightness-symbolic', _('Overall display brightness'));
         this._deviceSection = new PopupMenu.PopupMenuSection();
         this.menu.addMenuItem(this._deviceSection);
         this.menu.connect('open-state-changed', (_menu, open) => this._service.setMenuOpen(open));
@@ -581,8 +608,7 @@ class BrightnessPanel extends QuickSlider {
 
     update(devices) {
         this._devices = devices;
-        const values = devices.map(device => device.requestedValue ?? device.value);
-        const value = values.length ? values.reduce((sum, current) => sum + current, 0) / values.length : 1;
+        const value = this._service.globalBrightness;
         this._syncingMainSlider = true;
         this.slider.value = this._sliderPositionForBrightness(value);
         this._syncingMainSlider = false;
