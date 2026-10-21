@@ -1,9 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import {clampBrightnessToMinimum, normalizeBrightness, parseDdcBrightness, parseDdcDetection,
+import {brightnessToSliderPosition, clampBrightnessToMinimum, normalizeBrightness, parseDdcBrightness, parseDdcDetection,
     DdcWriteQueue, ddcReadingMatchesRequest, matchDdcDisplay, normalizeConnector, parseDdcReading, retryDelay,
-    sameDisplayedPercent, selectBrightnessBackend} from '../brightness-model.js';
+    sameDisplayedPercent, selectBrightnessBackend, sliderPositionToBrightness} from '../brightness-model.js';
 
 test('selects native backlight before DDC/CI and software', () => {
     assert.equal(selectBrightnessBackend({backlight: true, ddc: true}), 'mutter');
@@ -26,6 +26,15 @@ test('clamps values below the safe minimum without shifting normal display readi
     assert.equal(clampBrightnessToMinimum(0, 10), .1);
     assert.equal(clampBrightnessToMinimum(.19, 10), .19);
     assert.equal(clampBrightnessToMinimum(0, 0), .02);
+});
+
+test('maps the safe brightness floor to the slider left edge', () => {
+    assert.equal(brightnessToSliderPosition(.02, 2), 0);
+    assert.equal(brightnessToSliderPosition(1, 2), 1);
+    assert.equal(sliderPositionToBrightness(0, 2), .02);
+    assert.equal(sliderPositionToBrightness(1, 2), 1);
+    assert.equal(brightnessToSliderPosition(.1, 10), 0);
+    assert.ok(Math.abs(sliderPositionToBrightness(brightnessToSliderPosition(.55, 10), 10) - .55) < 1e-12);
 });
 
 test('detects equality using the displayed whole percentages', () => {

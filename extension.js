@@ -8,8 +8,9 @@ import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import {QuickSlider, SystemIndicator} from 'resource:///org/gnome/shell/ui/quickSettings.js';
 import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 import {Slider} from 'resource:///org/gnome/shell/ui/slider.js';
-import {clampBrightnessToMinimum, normalizeBrightness, parseDdcDetection, parseDdcReading, retryDelay,
-    DdcWriteQueue, ddcReadingMatchesRequest, matchDdcDisplay, selectBrightnessBackend} from './brightness-model.js';
+import {brightnessToSliderPosition, clampBrightnessToMinimum, normalizeBrightness, parseDdcDetection,
+    parseDdcReading, retryDelay, sliderPositionToBrightness, DdcWriteQueue,
+    ddcReadingMatchesRequest, matchDdcDisplay, selectBrightnessBackend} from './brightness-model.js';
 
 const DDC_TIMEOUT_MS = 3000;
 const DDC_DEBOUNCE_MS = 100;
@@ -548,7 +549,7 @@ class BrightnessPanel extends QuickSlider {
         this.slider.accessible_name = _('Brightness for all displays');
         this.slider.connect('notify::value', () => {
             if (!this._syncingMainSlider)
-                this._service.setAll(this.slider.value);
+                this._service.setAll(this._brightnessAtSliderPosition(this.slider.value));
         });
 
         this._mainPercentage = new St.Label({text: '100%', style_class: 'dim-label'});
@@ -569,6 +570,7 @@ class BrightnessPanel extends QuickSlider {
         controls.insert_child_at_index(this._mainPercentage, arrowIndex);
         controls.insert_child_at_index(this._resetButton, arrowIndex + 1);
         owner.settings.connectObject('changed::show-percentage', () => this._syncMenu(this._devices), this);
+        owner.settings.connectObject('changed::minimum-brightness', () => this.update(this._devices), this);
 
         this.menu.setHeader('display-brightness-symbolic', _('Display brightness'));
         this._deviceSection = new PopupMenu.PopupMenuSection();
@@ -582,7 +584,7 @@ class BrightnessPanel extends QuickSlider {
         const values = devices.map(device => device.requestedValue ?? device.value);
         const value = values.length ? values.reduce((sum, current) => sum + current, 0) / values.length : 1;
         this._syncingMainSlider = true;
-        this.slider.value = value;
+        this.slider.value = this._sliderPositionForBrightness(value);
         this._syncingMainSlider = false;
         this._resetButton.reactive = devices.length > 0;
         this._resetButton.can_focus = devices.length > 0;
@@ -617,7 +619,7 @@ class BrightnessPanel extends QuickSlider {
             control.method.text = this._methodLabel(device, device.requestedValue !== undefined && device.requestedValue !== null);
             if (!control.adjusting) {
                 this._syncingMenuSlider = true;
-                control.slider.value = value;
+                control.slider.value = this._sliderPositionForBrightness(value);
                 this._syncingMenuSlider = false;
             }
             control.error.text = device.error;
@@ -651,7 +653,7 @@ class BrightnessPanel extends QuickSlider {
         infoItem.add_child(info);
         this._deviceSection.addMenuItem(infoItem);
 
-        const slider = new Slider(device.requestedValue ?? device.value);
+        const slider = new Slider(this._sliderPositionForBrightness(device.requestedValue ?? device.value));
         slider.accessible_name = _('Brightness for %s').format(device.name);
         const sliderBin = new St.Bin({
             style_class: 'slider-bin',
@@ -686,12 +688,24 @@ class BrightnessPanel extends QuickSlider {
         slider.connect('drag-begin', () => control.adjusting = true);
         slider.connect('drag-end', () => {
             control.adjusting = false;
-            this._service.setBrightness(device.id, slider.value);
+            this._service.setBrightness(device.id, this._brightnessAtSliderPosition(slider.value));
         });
         slider.connect('notify::value', () => {
             if (!this._syncingMenuSlider && !control.adjusting)
-                this._service.setBrightness(device.id, slider.value);
+                this._service.setBrightness(device.id, this._brightnessAtSliderPosition(slider.value));
         });
+    }
+
+    _minimumBrightness() {
+        return this._settings.get_int('minimum-brightness');
+    }
+
+    _sliderPositionForBrightness(value) {
+        return brightnessToSliderPosition(value, this._minimumBrightness());
+    }
+
+    _brightnessAtSliderPosition(position) {
+        return sliderPositionToBrightness(position, this._minimumBrightness());
     }
 });
 
@@ -707,47 +721,93 @@ class Indicator extends SystemIndicator {
 export default class LumaExtension extends Extension {
     enable() {
         this.settings = this.getSettings();
-        this._brightnessIndicator = Main.panel.statusArea.quickSettings._brightness;
-        this._previousVisibility = this._brightnessIndicator?.visible ?? false;
-        this._brightnessItems = [...(this._brightnessIndicator?.quickSettingsItems ?? [])].map(item => [item, item.visible]);
-        if (this._brightnessIndicator)
-            this._brightnessIndicator.visible = false;
-        for (const [item] of this._brightnessItems)
-            item.visible = false;
+        this._brightnessIndicator = null;
+        this._brightnessItems = [];
+        this._hideNativeBrightness();
         this.service = new BrightnessService(this.settings, devices => this._indicator?.panel.update(devices));
         this._indicator = new Indicator(this);
+        this._indicator.panel.visible = false;
         Main.panel.statusArea.quickSettings.addExternalIndicator(this._indicator);
-        this._placeAfterVolume();
         this._quickSettingsMenu = Main.panel.statusArea.quickSettings.menu;
         this._quickSettingsMenu.connectObject('open-state-changed', (_menu, open) => this.service?.setMenuOpen(open), this);
-        this._monitorManager = global.backend.get_monitor_manager();
-        this._monitorManager.connectObject('monitors-changed', () => this._placeAfterVolume(), this);
+        this._schedulePanelPlacement();
     }
 
-    _placeAfterVolume() {
-        const menu = Main.panel.statusArea.quickSettings.menu;
+    _schedulePanelPlacement() {
+        if (this._placementTimer)
+            GLib.Source.remove(this._placementTimer);
+        this._placementAttempts = 0;
+        this._placementTimer = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 100, () => {
+            if (this._placeAfterVolume()) {
+                this._placementTimer = 0;
+                return GLib.SOURCE_REMOVE;
+            }
+            if (++this._placementAttempts < 100)
+                return GLib.SOURCE_CONTINUE;
+
+            // GNOME creates the volume items asynchronously. If no microphone
+            // control was created, the output control still anchors the row.
+            if (!this._placeAfterVolume(true))
+                this._indicator.panel.visible = true;
+            this._placementTimer = 0;
+            return GLib.SOURCE_REMOVE;
+        });
+    }
+
+    _placeAfterVolume(allowPartial = false) {
+        const quickSettings = Main.panel.statusArea.quickSettings;
+        this._hideNativeBrightness();
+        const menu = quickSettings?.menu;
         const grid = menu?._grid;
         const item = this._indicator?.panel;
         if (!grid || !item)
-            return;
-        const volumes = [
-            ...Main.panel.statusArea.quickSettings._volumeOutput?.quickSettingsItems ?? [],
-            ...Main.panel.statusArea.quickSettings._volumeInput?.quickSettingsItems ?? [],
-        ];
+            return false;
+
+        const output = [...(quickSettings._volumeOutput?.quickSettingsItems ?? [])];
+        const input = [...(quickSettings._volumeInput?.quickSettingsItems ?? [])];
         const children = grid.get_children();
-        const lastIndex = Math.max(-1, ...volumes.map(v => children.indexOf(v)));
-        const sibling = children[lastIndex + 1];
-        if (sibling && sibling !== item) {
-            grid.remove_child(item);
-            menu.insertItemBefore(item, sibling, 2);
-        } else if (!sibling && children.at(-1) !== item) {
-            grid.remove_child(item);
-            menu.addItem(item, 2);
+        const outputItems = output.filter(control => children.includes(control));
+        const inputItems = input.filter(control => children.includes(control));
+        if (outputItems.length === 0 || (!allowPartial && input.length > 0 && inputItems.length !== input.length))
+            return false;
+
+        // addExternalIndicator() has already registered the item with the menu.
+        // Reorder that existing grid child instead of registering its menu twice.
+        if (item.get_parent() !== grid)
+            return false;
+
+        const volumeItems = [...outputItems, ...inputItems];
+        const lastIndex = Math.max(...volumeItems.map(control => children.indexOf(control)));
+        const sibling = children.slice(lastIndex + 1).find(child => child !== item);
+        grid.layout_manager.child_set_property(grid, item, 'column-span', 2);
+        if (sibling)
+            grid.set_child_below_sibling(item, sibling);
+        else if (children.at(-1) !== item)
+            grid.set_child_above_sibling(item, children.at(-1));
+        item.visible = true;
+        return true;
+    }
+
+    _hideNativeBrightness() {
+        if (!this._brightnessIndicator) {
+            const indicator = Main.panel.statusArea.quickSettings._brightness;
+            if (!indicator)
+                return false;
+            this._brightnessIndicator = indicator;
+            this._previousVisibility = indicator.visible;
+            this._brightnessItems = [...(indicator.quickSettingsItems ?? [])]
+                .map(item => [item, item.visible]);
         }
+        this._brightnessIndicator.visible = false;
+        for (const [item] of this._brightnessItems)
+            item.visible = false;
+        return true;
     }
 
     disable() {
-        this._monitorManager?.disconnectObject(this);
+        if (this._placementTimer)
+            GLib.Source.remove(this._placementTimer);
+        this._placementTimer = 0;
         this._quickSettingsMenu?.disconnectObject(this);
         this._quickSettingsMenu = null;
         this.service?.destroy();

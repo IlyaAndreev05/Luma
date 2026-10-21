@@ -18,6 +18,18 @@ export function clampBrightnessToMinimum(value, minimumPercent = 2) {
     return Math.max(minimum, normalized);
 }
 
+export function brightnessToSliderPosition(value, minimumPercent = 2) {
+    const minimum = Math.min(20, Math.max(2, Number(minimumPercent) || 2)) / 100;
+    const brightness = clampBrightnessToMinimum(value, minimumPercent);
+    return (brightness - minimum) / (1 - minimum);
+}
+
+export function sliderPositionToBrightness(position, minimumPercent = 2) {
+    const minimum = Math.min(20, Math.max(2, Number(minimumPercent) || 2)) / 100;
+    const normalizedPosition = Math.min(1, Math.max(0, Number(position) || 0));
+    return minimum + normalizedPosition * (1 - minimum);
+}
+
 export function sameDisplayedPercent(displays) {
     return displays.length > 0 && displays.every(display =>
         Math.round(display.value * 100) === Math.round(displays[0].value * 100));
