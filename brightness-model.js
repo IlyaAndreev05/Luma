@@ -19,10 +19,8 @@ export function clampBrightnessToMinimum(value, minimumPercent = 2) {
 }
 
 export function combinedBrightness(globalValue, displayValue, minimumPercent = 2) {
-    const minimum = Math.min(20, Math.max(2, Number(minimumPercent) || 2)) / 100;
-    return Math.max(minimum,
-        clampBrightnessToMinimum(globalValue, minimumPercent) *
-        clampBrightnessToMinimum(displayValue, minimumPercent));
+    return clampBrightnessToMinimum(globalValue, minimumPercent) *
+        clampBrightnessToMinimum(displayValue, minimumPercent);
 }
 
 export function displayBrightnessFromOutput(outputValue, globalValue, minimumPercent = 2) {
@@ -94,7 +92,7 @@ export class DdcWriteQueue {
         const scale = Number.isFinite(maximum) && maximum > 0 ? maximum : 100;
         const request = {
             generation: this.generation,
-            value: Math.round(this.normalizedValue * scale),
+            value: Math.max(1, Math.round(this.normalizedValue * scale)),
         };
         this.pendingValue = null;
         return request;

@@ -4,7 +4,7 @@ Luma adds a compact display brightness control below the output and microphone s
 
 The main slider is an independent overall level. Luma applies it through each display's selected brightness backend, while each display slider keeps its own saved level. The visible output combines the two levels, so an overall level of 50% and a display level of 80% produce about 40% brightness. The overall level is saved separately and also applies to newly connected displays.
 
-The brightness sliders respect a configurable safe output floor (2–20%, default 2%) instead of turning the image fully black. Per-display percentages show the independent level for that device; the current percentage can be shown or hidden in Luma's settings.
+Each brightness slider has a configurable nonzero minimum (2–20%, default 2%). The two independent levels combine multiplicatively; hardware writes retain at least one device step so a low setting does not switch the display off. Per-display percentages show that device's independent level; the current percentage can be shown or hidden in Luma's settings.
 
 ## Install
 

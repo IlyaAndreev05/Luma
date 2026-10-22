@@ -49,9 +49,10 @@ test('keeps overall and per-display brightness independent and combines them onl
 });
 
 test('combined output respects the configured safe minimum', () => {
-    assert.equal(combinedBrightness(0, 0, 2), .02);
+    assert.equal(combinedBrightness(0, 0, 2), .0004);
+    assert.equal(combinedBrightness(1, .02, 2), .02);
     assert.equal(combinedBrightness(.5, .3, 10), .15);
-    assert.equal(combinedBrightness(.02, .02, 10), .1);
+    assert.ok(Math.abs(combinedBrightness(.02, .02, 10) - .01) < 1e-12);
 });
 
 test('detects equality using the displayed whole percentages', () => {
@@ -99,6 +100,14 @@ test('converts the latest normalized DDC request using the monitor maximum and r
     assert.equal(queue.retry(request), false);
     assert.deepEqual(queue.take(255), {generation: 2, value: 77});
     assert.equal(queue.canPublish(2), true);
+});
+
+test('keeps a minimum nonzero DDC step when the combined level would round to zero', () => {
+    const queue = new DdcWriteQueue();
+    queue.enqueue(.0004);
+    assert.deepEqual(queue.take(100), {generation: 1, value: 1});
+    queue.enqueue(0);
+    assert.deepEqual(queue.take(255), {generation: 2, value: 1});
 });
 
 test('parses DDC current and maximum brightness values', () => {

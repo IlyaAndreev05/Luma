@@ -445,13 +445,15 @@ class BrightnessService {
         }
         if (device.backend === 'mutter' && device.backlight) {
             const {brightnessMin, brightnessMax} = device.backlight;
+            const brightnessRange = brightnessMax - brightnessMin;
+            const minimumStep = brightnessRange > 0 ? 1 / brightnessRange : 1;
             device.requestedValue = value;
-            device.requestedOutputValue = outputValue;
-            device.backlight.brightness = Math.round(brightnessMin + outputValue * (brightnessMax - brightnessMin));
+            device.requestedOutputValue = Math.max(outputValue, minimumStep);
+            device.backlight.brightness = Math.round(brightnessMin + device.requestedOutputValue * brightnessRange);
         } else if (device.backend === 'mutter' && device.nativeScale) {
             device.requestedValue = value;
-            device.requestedOutputValue = outputValue;
-            device.nativeScale.value = outputValue;
+            device.requestedOutputValue = Math.max(outputValue, .01);
+            device.nativeScale.value = device.requestedOutputValue;
         } else {
             // Software dimming is explicitly shown in the UI and never changes the reported hardware level.
             device.softwareValue = value;
